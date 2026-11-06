@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# ==============================================================================
+#  ⚡ Installed Tools & Shortcuts Detector
+#  Grouped by Installed Application / Package (Clean, Fast & Dynamic)
+# ==============================================================================
+
+# Enable built-in string matching & nullglob
+shopt -s nocasematch 2>/dev/null
+shopt -s expand_aliases 2>/dev/null
+shopt -s nullglob 2>/dev/null
+
+# ANSI Colors
+BOLD="\033[1m"
+DIM="\033[2m"
+CYAN="\033[0;36m"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+BLUE="\033[0;34m"
+MAGENTA="\033[0;35m"
+WHITE="\033[1;37m"
+GRAY="\033[0;90m"
+RESET="\033[0m"
+
+# Handle arguments
+FILTER=""
+SHOW_ALL=0
+
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            echo ""
+            echo -e "${CYAN}${BOLD}⚡ Installed Tools & Shortcuts Detector${RESET}"
+            echo -e "${GRAY}Usage:${RESET}"
+            echo -e "  ${GREEN}shortcuts${RESET}             List shortcuts grouped by each installed app/tool"
+            echo -e "  ${GREEN}shortcuts <query>${RESET}     Filter by tool name or command (e.g. ${YELLOW}shortcuts agy${RESET})"
+            echo -e "  ${GREEN}shortcuts --all${RESET}       Show all raw executables (including shims & pip packages)"
+            echo -e "  ${GREEN}shortcuts -h, --help${RESET}  Show this help message"
+            echo ""
+            exit 0
+            ;;
+        -a|--all)
+            SHOW_ALL=1
+            ;;
+        *)
+            [ -z "$FILTER" ] && FILTER="$arg"
+            ;;
+    esac
+done
+
+# Header Banner
+echo ""
+echo -e "${CYAN}╭──────────────────────────────────────────────────────────────╮${RESET}"
+echo -e "${CYAN}│  ${BOLD}${WHITE}⚡ INSTALLED TOOLS & SHORTCUTS${RESET}${CYAN}                              │${RESET}"
+echo -e "${CYAN}│  ${DIM}Grouped by each installed tool & package${RESET}${CYAN}                    │${RESET}"
+echo -e "${CYAN}╰──────────────────────────────────────────────────────────────╯${RESET}"
+
+# Environment Detection
+ENV_NAME="Standard Linux"
+if [ -d "/data/data/com.termux/files" ]; then
+    if [ -f "/etc/debian_version" ]; then
+        ENV_NAME="Termux (PRoot Debian $(cat /etc/debian_version 2>/dev/null))"
+    elif [ -f "/etc/issue" ]; then
+        distro=$(head -n 1 /etc/issue 2>/dev/null | awk '{print $1}')
+        ENV_NAME="Termux (PRoot ${distro:-Distro})"
+    elif [ -n "$TERMUX_VERSION" ]; then
+        ENV_NAME="Termux Native (v${TERMUX_VERSION})"
+    else
+        ENV_NAME="Termux Environment"
+    fi
+elif grep -qi "microsoft" /proc/version 2>/dev/null; then
+    ENV_NAME="Windows WSL"
+elif [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+    ENV_NAME="macOS"
+elif [ -f "/etc/os-release" ]; then
+    distro=$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    ENV_NAME="${distro:-Linux}"
+fi
+
+echo -e "  ${DIM}Platform :${RESET} ${GREEN}${BOLD}${ENV_NAME}${RESET}  ${DIM}| Shell :${RESET} ${WHITE}${SHELL##*/}${RESET}"
+if [ -n "$FILTER" ]; then
+    echo -e "  ${DIM}Filter   :${RESET} ${YELLOW}${BOLD}'${FILTER}'${RESET} ${DIM}(case-insensitive search)${RESET}"
+fi
+echo ""
+
+TOTAL_TOOLS=0
+TOTAL_SHORTCUTS=0
+
+# Noise / Shim Filter (ignore OS wrappers & pip dependencies)
+is_noise() {
+    local name="$1"
+    [ $SHOW_ALL -eq 1 ] && return 1
+    case "$name" in
+        # System shims & OS wrappers
+        sudo|termux-exec|xdg-open|open|sensible-browser|x-www-browser|termux-open|termux-open-url) return 0 ;;
+        # Python pip dependencies
+        fastapi|idna|uvicorn|playwright|pip|pip3|pipx|wheel|easy_install|setuptools|pytest|mypy|black|flake8) return 0 ;;
+        # Internal engine binaries & setup files
+        agentapi|webm_encoder|shortcuts|setup-macos-desktop|rish_shizuku.dex) return 0 ;;
+        # Backup & temp files
+        *.old|*~|*.bak|*.tmp|*.dex|*.swp) return 0 ;;
+    esac
+    return 1
+}
+
+# Function to render an installed package / tool group
+render_package() {
+    local title="$1"
+    shift
+    local items=("$@")
+
+    # Check if any item actually exists in system
+    local existing_items=()
+    for item in "${items[@]}"; do
+        IFS='|' read -r cmd aliases desc <<< "$item"
+        if which "$cmd" >/dev/null 2>&1; then
+            # If filtering, check match
+            if [ -n "$FILTER" ]; then
+                if [[ "$title" != *"$FILTER"* ]] && [[ "$cmd" != *"$FILTER"* ]] && [[ "$aliases" != *"$FILTER"* ]] && [[ "$desc" != *"$FILTER"* ]]; then
+                    continue
+                fi
+            fi
+            existing_items+=("$item")
+        fi
+    done
+
+    # If none found/matched, skip printing this group
+    [ ${#existing_items[@]} -eq 0 ] && return 1
+
+    echo -e "${BLUE}${BOLD}📦 ${title}${RESET}"
+    echo -e "${GRAY}────────────────────────────────────────────────────────────────${RESET}"
+    for item in "${existing_items[@]}"; do
+        IFS='|' read -r cmd aliases desc <<< "$item"
+        if [ -n "$aliases" ]; then
+            printf "  ${GREEN}${BOLD}%-16s${RESET} ${DIM}(%-20s)${RESET} ${WHITE}%s${RESET}\n" "$cmd" "$aliases" "$desc"
+        else
+            printf "  ${GREEN}${BOLD}%-16s${RESET} ${DIM}%-22s${RESET} ${WHITE}%s${RESET}\n" "$cmd" "" "$desc"
+        fi
+        ((TOTAL_SHORTCUTS++))
+    done
+    echo ""
+    ((TOTAL_TOOLS++))
+    return 0
+}
+
+# Track all known commands to detect unmapped new installs
+KNOWN_CMDS="agy agy-claude agy-switcher agy-rotation opencode opencode2 app appdroid rish sdtimer shutdown-timer termux-x11-show desktop start-desktop xfce xfce4 lxqt kill-desktop stop-desktop stop-xfce xfce-tiling brave brave-desktop brave-ext chrome-desktop chrome-x11 chromium-desktop nouride googlepro gpro"
+
+# 1. Grouped Packages
+render_package "Google Antigravity" \
+    "agy|agy-claude|Google Antigravity AI Agent" \
+    "agy-switcher|agy-rotation|Account Switcher & Auto-Rotation"
+
+render_package "OpenCode" \
+    "opencode|opencode2|Autonomous AI Coding Agent"
+
+render_package "Appdroid" \
+    "appdroid|app|Android Application & APK Manager"
+
+render_package "Desktop Environment (XFCE / X11)" \
+    "desktop|xfce, lxqt, start|Start X11 GUI desktop session" \
+    "kill-desktop|stop-desktop, stop-xfce|Stop X11 GUI desktop session" \
+    "xfce-tiling||Window tiling manager for XFCE"
+
+render_package "Brave Browser" \
+    "brave|brave-desktop, ext|Brave Web Browser launcher"
+
+render_package "Chromium Browser" \
+    "chrome-desktop|chromium, chrome-x11|Chromium Web Browser launcher"
+
+render_package "Shutdown Timer" \
+    "sdtimer|shutdown-timer|Countdown timer for sleep/shutdown"
+
+render_package "Shizuku" \
+    "rish||Privileged Android terminal access via Shizuku"
+
+render_package "NourIDE" \
+    "nouride||Code editor launcher"
+
+render_package "Termux-X11" \
+    "termux-x11-show||Bring Termux-X11 window to foreground"
+
+render_package "Google Pro" \
+    "googlepro|gpro|Google Pro assistant script"
+
+# 2. Dynamic Discovery for other newly installed packages
+OTHER_OUTPUT=""
+SCAN_DIRS=("/usr/local/bin" "$HOME/.local/bin" "$HOME/.opencode/bin" "$HOME/bin" "$HOME/.shortcuts")
+OTHER_COUNT=0
+
+for d in "${SCAN_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+        [ -x "$f" ] || [ -L "$f" ] || continue
+        name="${f##*/}"
+
+        # Skip if noise or already in known packages
+        is_noise "$name" && continue
+        if [[ " $KNOWN_CMDS " == *" $name "* ]]; then
+            continue
+        fi
+
+        if [ -n "$FILTER" ]; then
+            if [[ "$name" != *"$FILTER"* ]]; then
+                continue
+            fi
+        fi
+
+        target=""
+        [ -L "$f" ] && target=$(readlink "$f" 2>/dev/null)
+        if [ -n "$target" ]; then
+            OTHER_OUTPUT="${OTHER_OUTPUT}  ${GREEN}${BOLD}$(printf "%-16s" "$name")${RESET} ${GRAY}→${RESET} ${DIM}${target/#$HOME/~}${RESET}\n"
+        else
+            OTHER_OUTPUT="${OTHER_OUTPUT}  ${GREEN}${BOLD}$(printf "%-16s" "$name")${RESET} ${DIM}[custom executable]${RESET}\n"
+        fi
+        ((OTHER_COUNT++))
+    done
+done
+
+if [ $OTHER_COUNT -gt 0 ]; then
+    echo -e "${BLUE}${BOLD}📦 Other Installed Tools${RESET}"
+    echo -e "${GRAY}────────────────────────────────────────────────────────────────${RESET}"
+    echo -ne "$OTHER_OUTPUT"
+    echo ""
+    ((TOTAL_TOOLS++))
+    TOTAL_SHORTCUTS=$((TOTAL_SHORTCUTS + OTHER_COUNT))
+fi
+
+# 3. Custom Navigation Aliases (Shell)
+PS1=1
+for rc in "$HOME/.bash_aliases" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [ -f "$rc" ] && source "$rc" 2>/dev/null
+done
+
+ALIAS_ITEMS=()
+ALIASES=$(alias 2>/dev/null)
+if [ -n "$ALIASES" ]; then
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^alias[[:space:]]+([^=]+)=\'(.*)\'$ ]] || [[ "$line" =~ ^alias[[:space:]]+([^=]+)=\"(.*)\"$ ]] || [[ "$line" =~ ^alias[[:space:]]+([^=]+)=(.*)$ ]]; then
+            aname="${BASH_REMATCH[1]}"
+            acmd="${BASH_REMATCH[2]}"
+
+            # Skip boilerplate
+            case "$aname" in
+                ls|ll|la|l|grep|egrep|fgrep|cp|mv|rm|which|df|free) continue ;;
+                sdcard|termux-home) continue ;; # merged aliases
+            esac
+
+            if [ "$aname" = "android" ]; then
+                aname="android / sdcard"
+            elif [ "$aname" = "termux" ]; then
+                aname="termux / termux-home"
+            fi
+
+            if [ -n "$FILTER" ]; then
+                if [[ "$aname" != *"$FILTER"* ]] && [[ "$acmd" != *"$FILTER"* ]]; then
+                    continue
+                fi
+            fi
+
+            ALIAS_ITEMS+=("${aname}|${acmd}")
+        fi
+    done <<< "$ALIASES"
+fi
+
+if [ ${#ALIAS_ITEMS[@]} -gt 0 ]; then
+    echo -e "${BLUE}${BOLD}🔗 Navigation Aliases${RESET}"
+    echo -e "${GRAY}────────────────────────────────────────────────────────────────${RESET}"
+    for a in "${ALIAS_ITEMS[@]}"; do
+        IFS='|' read -r aname acmd <<< "$a"
+        printf "  ${MAGENTA}${BOLD}%-20s${RESET} ${GRAY}→${RESET} ${WHITE}%s${RESET}\n" "$aname" "$acmd"
+        ((TOTAL_SHORTCUTS++))
+    done
+    echo ""
+fi
+
+# Summary
+echo -e "${CYAN}────────────────────────────────────────────────────────────────${RESET}"
+if [ -n "$FILTER" ]; then
+    echo -e "  ${BOLD}${WHITE}📊 SUMMARY : Found ${GREEN}${TOTAL_SHORTCUTS}${WHITE} shortcuts matching '${YELLOW}${FILTER}${WHITE}'${RESET}"
+else
+    echo -e "  ${BOLD}${WHITE}📊 SUMMARY : ${GREEN}${TOTAL_TOOLS}${WHITE} Installed Tools & ${GREEN}${#ALIAS_ITEMS[@]}${WHITE} Navigation Aliases (${TOTAL_SHORTCUTS} total shortcuts)${RESET}"
+fi
+echo -e "${CYAN}────────────────────────────────────────────────────────────────${RESET}"
+echo ""
