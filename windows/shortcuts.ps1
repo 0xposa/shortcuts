@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
-    Installed Tools & Shortcuts Detector for Windows PowerShell
+    Dynamic Installed Tools & Shortcuts Detector for Windows PowerShell
 .DESCRIPTION
-    Grouped strictly by each installed application and package (not generic categories).
+    Pure dynamic detection and clustering (zero hardcoding).
+    Groups tools by dedicated directory, executable prefix, and symlink targets.
 #>
 
 [CmdletBinding()]
@@ -14,9 +15,9 @@ param(
 
 if ($Query -in @("-h", "--help", "/?")) {
     Write-Host ""
-    Write-Host "⚡ Installed Tools & Shortcuts Detector (Windows PowerShell)" -ForegroundColor Cyan
+    Write-Host "⚡ Dynamic Installed Tools & Shortcuts Detector (Windows PowerShell)" -ForegroundColor Cyan
     Write-Host "Usage:" -ForegroundColor DarkGray
-    Write-Host "  .\shortcuts.ps1             List shortcuts grouped by installed app/tool" -ForegroundColor Green
+    Write-Host "  .\shortcuts.ps1             Auto-detect & group shortcuts by installed application" -ForegroundColor Green
     Write-Host "  .\shortcuts.ps1 <query>     Filter by tool name or command (e.g. .\shortcuts.ps1 git)" -ForegroundColor Green
     Write-Host "  .\shortcuts.ps1 -All        Show all raw tools and packages" -ForegroundColor Green
     Write-Host "  .\shortcuts.ps1 -h, --help  Show this help message" -ForegroundColor Green
@@ -27,8 +28,8 @@ if ($Query -in @("-h", "--help", "/?")) {
 Clear-Host
 Write-Host ""
 Write-Host "╭──────────────────────────────────────────────────────────────╮" -ForegroundColor Cyan
-Write-Host "│  ⚡ INSTALLED TOOLS & SHORTCUTS                              │" -ForegroundColor White
-Write-Host "│  Grouped by each installed tool & package                    │" -ForegroundColor DarkGray
+Write-Host "│  ⚡ DYNAMIC INSTALLED TOOLS & SHORTCUTS                      │" -ForegroundColor White
+Write-Host "│  Auto-detected & grouped by installed application            │" -ForegroundColor DarkGray
 Write-Host "╰──────────────────────────────────────────────────────────────╯" -ForegroundColor Cyan
 
 $psVer = $PSVersionTable.PSVersion.ToString()
@@ -38,59 +39,125 @@ if ($Query) {
 }
 Write-Host ""
 
-$totalTools = 0
+$totalPackages = 0
 $totalShortcuts = 0
 
-function Render-ToolGroup ($title, $commands) {
-    $matched = @()
-    foreach ($item in $commands) {
-        $parts = $item -split '\|'
-        $cmd = $parts[0]
-        $alias = $parts[1]
-        $desc = $parts[2]
-
-        if ($Query) {
-            if ($title -notlike "*$Query*" -and $cmd -notlike "*$Query*" -and $alias -notlike "*$Query*" -and $desc -notlike "*$Query*") {
-                continue
-            }
-        }
-        $matched += [PSCustomObject]@{
-            Cmd = $cmd
-            Alias = $alias
-            Desc = $desc
-        }
-    }
-
-    if ($matched.Count -eq 0) { return }
-
-    Write-Host "📦 $title" -ForegroundColor Blue
-    Write-Host "────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-    foreach ($m in $matched) {
-        $aliasStr = if ($m.Alias) { "($($m.Alias))" } else { "" }
-        Write-Host ("  {0,-16} {1,-20} {2}" -f $m.Cmd, $aliasStr, $m.Desc) -ForegroundColor Green
-        $script:totalShortcuts++
-    }
-    Write-Host ""
-    $script:totalTools++
+function Test-Noise ($name) {
+    if ($All) { return $false }
+    $noiseList = @(
+        'fastapi','idna','uvicorn','playwright','pip','pip3','wheel','easy_install','setuptools',
+        'pytest','mypy','black','flake8','agentapi','webm_encoder','shortcuts'
+    )
+    return ($noiseList -contains $name.ToLower())
 }
 
-# Example Groups for Windows Tools
-Render-ToolGroup "Git Version Control" @(
-    "git||Distributed version control CLI",
-    "git-bash||Git Bash terminal launcher"
+# 1. Discover Custom Directories
+$sysPaths = @(
+    "C:\Windows",
+    "C:\Windows\System32",
+    "C:\Windows\SysWOW64",
+    "C:\Windows\System32\Wbem",
+    "C:\Windows\System32\WindowsPowerShell\v1.0"
 )
 
-Render-ToolGroup "Node.js & Package Managers" @(
-    "node||Node.js JavaScript runtime",
-    "npm|npx|Node Package Manager & runner"
-)
+$pathList = ($env:PATH -split ';') | Where-Object { $_ -and (Test-Path $_) } | ForEach-Object { $_.TrimEnd('\') } | Select-Object -Unique
+$userPaths = $pathList | Where-Object {
+    $p = $_
+    -not ($sysPaths -contains $p -or $p -like "C:\Windows\*")
+}
 
-Render-ToolGroup "Python & Virtual Environments" @(
-    "python|py|Python interpreter",
-    "pip||Python package manager"
-)
+$extraDirs = @(
+    "$HOME\bin",
+    "$HOME\.local\bin",
+    "$HOME\Scripts",
+    "$env:ProgramData\chocolatey\bin",
+    "$HOME\.cargo\bin",
+    "$HOME\.bun\bin",
+    "$HOME\.deno\bin"
+) | Where-Object { (Test-Path $_) }
 
-# Custom PowerShell User Aliases
+$scanDirs = @($userPaths) + @($extraDirs) | Select-Object -Unique
+
+# 2. Collect All Executables
+$commands = @()
+foreach ($dir in $scanDirs) {
+    $files = Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Extension -in @(".bat", ".cmd", ".ps1", ".exe") -and -not (Test-Noise $_.BaseName)
+    }
+
+    foreach ($f in $files) {
+        $parent = (Split-Path (Split-Path $dir -Parent) -Leaf).TrimStart('.')
+        $target = if ($f.LinkType) { (Split-Path $f.Target -Leaf) } else { $f.Name }
+
+        $commands += [PSCustomObject]@{
+            Name   = $f.Name
+            Base   = $f.BaseName
+            Target = $target
+            Dir    = $dir
+            Parent = $parent
+            Ext    = $f.Extension
+        }
+    }
+}
+
+# 3. Dynamic Grouping
+$groups = @{}
+foreach ($c in $commands) {
+    $group = ""
+    # Check dedicated parent directory
+    if ($c.Parent -and $c.Parent -notin @("Users", "AppData", "Local", "Roaming", "bin", "Program Files")) {
+        $group = $c.Parent
+    } else {
+        # Prefix clustering
+        $prefix = ($c.Base -split '[-_]')[0]
+        $targetPrefix = ($c.Target -split '[-_]')[0]
+
+        if ($prefix -ne $c.Base -and $prefix.Length -ge 3) {
+            $group = $prefix
+        } elseif ($c.Target -ne $c.Name) {
+            $group = ($c.Target -split '\.')[0]
+        } else {
+            $group = $c.Base
+        }
+    }
+
+    if (-not $groups.ContainsKey($group)) {
+        $groups[$group] = @()
+    }
+    $groups[$group] += $c
+}
+
+# 4. Render Dynamic Groups
+foreach ($g in ($groups.Keys | Sort-Object)) {
+    $cmds = $groups[$g]
+    $matched = @()
+    foreach ($c in $cmds) {
+        if ($Query) {
+            if ($g -like "*$Query*" -or $c.Name -like "*$Query*" -or $c.Target -like "*$Query*") {
+                $matched += $c
+            }
+        } else {
+            $matched += $c
+        }
+    }
+
+    if ($matched.Count -eq 0) { continue }
+
+    Write-Host "📦 $g" -ForegroundColor Blue
+    Write-Host "────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    foreach ($m in $matched) {
+        if ($m.Target -ne $m.Name) {
+            Write-Host ("  {0,-18} → {1,-18} [symlink]" -f $m.Name, $m.Target) -ForegroundColor Green
+        } else {
+            Write-Host ("  {0,-18} [{1}]" -f $m.Name, $m.Ext.TrimStart('.')) -ForegroundColor Green
+        }
+        $totalShortcuts++
+    }
+    Write-Host ""
+    $totalPackages++
+}
+
+# 5. Custom PowerShell User Aliases
 $builtinAliases = @(
     'cat','cd','chdir','clc','clear','clhy','cli','clp','cls','clv','cns','compare',
     'copy','cp','cpi','cpp','cvpa','del','diff','dir','ebp','echo','epal','epcsv',
@@ -123,7 +190,7 @@ if ($userAliases) {
         Write-Host "🔗 Custom PowerShell Aliases" -ForegroundColor Blue
         Write-Host "────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
         foreach ($a in $aliasMatched) {
-            Write-Host ("  {0,-16} → {1}" -f $a.Name, $a.Definition) -ForegroundColor Magenta
+            Write-Host ("  {0,-18} → {1}" -f $a.Name, $a.Definition) -ForegroundColor Magenta
             $totalShortcuts++
         }
         Write-Host ""
@@ -134,7 +201,7 @@ Write-Host "──────────────────────�
 if ($Query) {
     Write-Host ("  📊 SUMMARY : Found {0} shortcuts matching '{1}'" -f $totalShortcuts, $Query) -ForegroundColor White
 } else {
-    Write-Host ("  📊 SUMMARY : {0} Installed Tools & Custom Aliases ({1} total shortcuts)" -f $totalTools, $totalShortcuts) -ForegroundColor White
+    Write-Host ("  📊 SUMMARY : {0} Tool Packages & Custom Aliases ({1} total shortcuts)" -f $totalPackages, $totalShortcuts) -ForegroundColor White
 }
 Write-Host "────────────────────────────────────────────────────────────────" -ForegroundColor Cyan
 Write-Host ""
